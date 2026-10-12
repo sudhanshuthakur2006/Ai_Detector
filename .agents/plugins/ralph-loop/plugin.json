@@ -1,0 +1,8 @@
+{
+  "name": "ralph-loop",
+  "description": "Ralph Loop autonomous iterative execution plugin for Antigravity",
+  "version": "1.0.0",
+  "skills": [
+    "ralph-loop"
+  ]
+}
