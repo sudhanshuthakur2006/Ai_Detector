@@ -6,10 +6,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import io
+import logging
 
 from file_processor import FileProcessor
 from detector import AIDetector
 from humanizer import TextHumanizer
+
+logger = logging.getLogger("stealthdoc.main")
 
 app = FastAPI(
     title="StealthDoc API",
@@ -52,7 +55,7 @@ def health_check():
 
 @app.post("/api/detect")
 def detect_endpoint(payload: DetectRequest):
-    """Analyzes raw text and returns AI %, Human %, and Mixed % scores."""
+    """Analyzes raw text and returns calibrated AI %, Human %, and Mixed % scores with sentence highlights."""
     if not payload.text or not payload.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
     
@@ -62,7 +65,7 @@ def detect_endpoint(payload: DetectRequest):
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
     """
-    Accepts .docx or .txt file upload, extracts paragraphs, and runs baseline AI detection.
+    Accepts .docx or .txt file upload, extracts paragraphs and tables, and runs dynamic neural AI detection.
     """
     filename = file.filename or "document.txt"
     ext = os.path.splitext(filename)[1].lower()
@@ -80,13 +83,16 @@ async def upload_file(file: UploadFile = File(...)):
         full_text, paragraphs = FileProcessor.extract_from_txt(content_bytes)
 
     session_id = str(uuid.uuid4())
-    baseline_stats = detector.detect_text(full_text)
+    baseline_stats = detector.detect_text(full_text, paragraphs=paragraphs)
+
+    # Batch annotate paragraphs with sentence-level highlights
+    annotated_paragraphs = detector.annotate_paragraphs(paragraphs)
 
     sessions[session_id] = {
         "filename": filename,
         "extension": ext,
         "original_bytes": content_bytes,
-        "paragraphs": paragraphs,
+        "paragraphs": annotated_paragraphs,
         "full_text": full_text,
         "baseline_stats": baseline_stats,
         "humanized_paragraphs": None,
@@ -96,10 +102,10 @@ async def upload_file(file: UploadFile = File(...)):
     return {
         "session_id": session_id,
         "filename": filename,
-        "total_paragraphs": len(paragraphs),
+        "total_paragraphs": len(annotated_paragraphs),
         "total_words": len(full_text.split()),
         "full_text": full_text,
-        "paragraphs": paragraphs,
+        "paragraphs": annotated_paragraphs,
         "baseline_stats": baseline_stats
     }
 
@@ -114,10 +120,7 @@ def humanize_endpoint(
     """
     api_key = payload.api_key or x_gemini_api_key or os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise HTTPException(
-            status_code=400,
-            detail="Gemini API key is required. Supply via GEMINI_API_KEY env var, request body, or X-Gemini-Api-Key header."
-        )
+        print("[StealthDoc API] No Gemini API key provided. Using built-in Local NLP Humanizer Engine.")
 
     # Path 1: Session-based document humanization
     if payload.session_id and payload.session_id in sessions:
@@ -127,7 +130,9 @@ def humanize_endpoint(
         humanized_paragraphs = humanizer.humanize_document(paragraphs, api_key=api_key)
         humanized_full_text = "\n\n".join(p.get("text", "") for p in humanized_paragraphs if p.get("text", "").strip())
         
-        post_stats = detector.detect_text(humanized_full_text)
+        print("[StealthDoc API] Calculating post-humanization AI detection score...")
+        post_stats = detector.detect_text(humanized_full_text, paragraphs=humanized_paragraphs)
+        print(f"[StealthDoc API] Done! Before AI %: {session['baseline_stats'].get('ai_percentage')}% -> After AI %: {post_stats.get('ai_percentage')}%\n")
 
         session["humanized_paragraphs"] = humanized_paragraphs
         session["humanized_full_text"] = humanized_full_text
@@ -143,16 +148,18 @@ def humanize_endpoint(
 
     # Path 2: Direct raw text humanization
     if payload.text and payload.text.strip():
+        print(f"[StealthDoc API] Humanizing direct raw text ({len(payload.text.split())} words)...")
         rewritten_text = humanizer.humanize_paragraph(payload.text, api_key=api_key)
         before_stats = detector.detect_text(payload.text)
         after_stats = detector.detect_text(rewritten_text)
+        print(f"[StealthDoc API] Done! Before AI %: {before_stats.get('ai_percentage')}% -> After AI %: {after_stats.get('ai_percentage')}%\n")
 
         return {
             "session_id": None,
             "before_stats": before_stats,
             "after_stats": after_stats,
             "humanized_full_text": rewritten_text,
-            "humanized_paragraphs": [{"id": 0, "text": rewritten_text}]
+            "humanized_paragraphs": [{"id": 0, "text": rewritten_text, "is_ai": after_stats.get("ai_percentage", 0) > 50}]
         }
 
     raise HTTPException(status_code=400, detail="Either a valid session_id or text must be provided.")
@@ -161,7 +168,7 @@ def humanize_endpoint(
 def download_file(session_id: str):
     """
     Reconstructs the humanized document back into .docx or .txt format,
-    preserving original styles and formatting.
+    preserving original styles, formatting, and tables.
     """
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found or expired.")

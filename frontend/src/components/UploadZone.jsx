@@ -165,7 +165,7 @@ export default function UploadZone({ onFileUpload, onTextAnalyze, isAnalyzing })
           <textarea
             value={pastedText}
             onChange={(e) => setPastedText(e.target.value)}
-            placeholder="Paste your essay, article, or research text here to test AI detection and humanize..."
+            placeholder="Paste your essay, article, or research text here to test AI detection..."
             rows={8}
             className="w-full bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500/60 focus:ring-1 focus:ring-emerald-500/30 font-mono transition-all resize-y"
           />
